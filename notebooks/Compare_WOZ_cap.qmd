@@ -1,0 +1,100 @@
+---
+title: "Output21062023"
+format: html
+editor: visual
+fig-width: 8
+fig-height: 5
+---
+
+## Output 23-06-2023
+
+Dit document is ten behoeve van de eerste ambtelijke nota over dit project.
+
+## Voorbereiding
+
+Data inladen en opschonen:
+
+```{r}
+library(here)
+source(here('dependencies.R'))
+devtools::load_all()
+
+houses <- read_feather(here('sensitive_data_files/houses_realstats_2023-11-01.feather')) %>% filter(is.finite(purchase_price))
+wb <- loadWorkbook(here('sensitive_input_files/modelparams_testhuizen_all2.xlsx'))
+realstatshuizen_subset <- read.xlsx(wb, sheet = "voorbeeldhuizen" )
+lookup.table <- read.xlsx(wb, sheet = 'wws_lookup')
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+#houses <- houses %>% filter(huis_id %in% rep(1:100))
+
+house_properties <- houses %>%
+  group_by(huis_id, beleidsvariant) %>%
+  summarise(
+    investment_year = first(investment_year),
+    wws_points = first(wws_points),
+    oppervlak = first(oppervlak),
+    woz_value = first(woz_value),
+    value_estimate_2022 = first(value_estimate_based_on_woz),
+    rent_category = first(rent_category)
+  )
+
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+houses$aankoopwaarde = houses$purchase_price
+houses$overdrachtsbelasting = as.numeric(houses$overdrachtsbelasting)
+houses$belasting_box3_vrijstelling = as.numeric(houses$belasting_box3_vrijstelling)
+houses$box3.percentage = as.numeric(houses$box3.percentage)
+houses$belasting_box3_bezit = as.numeric(houses$belasting_box3_bezit)
+houses$belasting_box3_schuld = as.numeric(houses$belasting_box3_schuld)
+
+houses_wozcap <-
+  houses %>%
+  calculate_wws_points(.,wws_reform = 0, bA1 = bA1, bA91 = bA91, bA91b = bA91b) %>%
+        correct_woz_cap(.,threshold = 142) %>%
+        calculate_wws_rent(.,lookup.table) %>%
+        create_rent_category(.,142,142) %>%
+        get_growth_number() %>% 
+        select(-value_rent)
+
+houses_no_wozcap <-
+  houses %>%
+  calculate_wws_points(.,wws_reform = 0, bA1 = bA1, bA91 = bA91, bA91b = bA91b) %>%
+        correct_woz_cap(.,threshold = 999) %>%
+        calculate_wws_rent(.,lookup.table) %>%
+        create_rent_category(.,142,142) %>%
+        get_growth_number() %>%
+        select(-value_rent)
+
+#cleansing
+```
+
+## Resultaten
+
+Er wordt een vergelijking gemaakt tussen verhuurde woningen voor de wozcap van 142 inging, om te onderzoeken hoeveel woningen
+
+```{r}
+
+compare_cap <- houses_no_wozcap %>% left_join(
+  houses_wozcap, 
+    by = c('huis_id','beleidsvariant', 'simulation_year')) %>%
+  mutate(points_diff = case_when(
+    wws_points.x - wws_points.y != 0 ~ 1,
+    T ~0 
+  ),
+  points_abs_diff =  wws_points.x - wws_points.y,
+  under_cap = case_when((wws_points.y < 142) && (wws_points.x >= 142 ) ~ 1,
+                        T ~ 0 ))
+
+
+results <- compare_cap %>% filter(wws_points.x> 142 & wws_points.y < 142 & simulation_year ==2022)
+
+
+
+```
+
+```{r}
+impacted_by_cap <- compare_cap %>% filter(simulation_year == 2022 & points_diff == 1 & wws_points.y < 142 )
+
+length(impacted_by_cap$huis_id)
+median(impacted_by_cap$points_abs_diff)
+```

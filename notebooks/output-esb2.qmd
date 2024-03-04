@@ -1,0 +1,375 @@
+---
+title: "Output-ESB2"
+format: html
+editor: visual
+fig-width: 8
+fig-height: 5
+---
+
+## ESB 2
+
+Dit document is ten behoeve van een studie naar mogelijke alternatieven voor de middenhuurhervorming.
+
+## Voorbereiding
+
+Data inladen en opschonen:
+
+```{r}
+library(here)
+source(here('dependencies.R'))
+devtools::load_all()
+print(here())
+
+
+# houses <- read_feather(here('sensitive_data_files/houses_realstats_2024-01-08.feather')) %>% filter(is.finite(purchase_price))
+
+houses <- read_feather(here('nonsensitive_data_files/houses_realstats_2024-03-04.feather')) %>% filter(is.finite(purchase_price))
+
+wb <- loadWorkbook(here('nonsensitive_input_files/modelparams_testhuizen_all2.xlsx'))
+realstatshuizen_subset <- read.xlsx(wb, sheet = "voorbeeldhuizen" )
+lookup.table <- read.xlsx(wb, sheet = 'wws_lookup')
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+#houses <- houses %>% filter(huis_id %in% rep(1:100))
+
+house_properties <- houses %>%
+  group_by(huis_id, beleidsvariant) %>%
+  summarise(
+    investment_year = first(investment_year),
+    wws_points = first(wws_points),
+    oppervlak = first(oppervlak),
+    woz_value = first(woz_value),
+    value_estimate_2022 = first(value_estimate_based_on_woz),
+    rent_category = first(rent_category)
+  )
+
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+houses$aankoopwaarde = houses$purchase_price
+houses$overdrachtsbelasting = as.numeric(houses$overdrachtsbelasting)
+houses$belasting_box3_vrijstelling = as.numeric(houses$belasting_box3_vrijstelling)
+houses$box3.percentage = as.numeric(houses$box3.percentage)
+houses$belasting_box3_bezit = as.numeric(houses$belasting_box3_bezit)
+houses$belasting_box3_schuld = as.numeric(houses$belasting_box3_schuld)
+
+```
+
+```{r}
+parameters_sq <- list(
+  discount_rate = 0.0513,
+  rent_increase = 0.02,
+  upkeep_perc = 0.01,
+  debt_share = 0.5,
+  exploitation_cost = 0.15,
+  incidental_investment_year = 2022,
+  incidental_cost = 10000,
+  refinance_period = 5, # years
+  interest_rate = 0.052,
+  transfer_tax = 0.104,
+  middenhuur_reform = F,
+  lwr = "nieuw",
+  box3_oud = 'nee',
+  middenhuur_bump_percentage = 0,
+  middenhuur_bump_points = 0,
+  rent_cap_perc = NA,
+  rent_func = NA,
+  wws_dwingend = 'nee',
+  rent_cap_direct_return = NA,
+  interest_rates = interest_rates,
+  home_price_decline = -0.0625,
+  lookup.table = lookup.table,
+  vpb_rate = 0.19,
+  box2_rate = 0.245
+)
+
+parameters_wbh <- parameters_sq %>% 
+  list_modify(
+    middenhuur_reform = T,
+    lwr = "nieuw",
+    box3_oud = 'nee',
+    middenhuur_bump_percentage = 0,
+    middenhuur_bump_points = 0,
+    rent_cap_perc = NA,
+    rent_func = NA,
+    wws_dwingend = 'ja'
+  )
+
+box3_funcs <- list(
+  rent_func = list(call_calculate_rent_all_houses),
+  cap_func = list(no_cap),
+  aq_cost_func = list(transaction_buy_at_market_value),
+  running_cost_funcs = list(
+    call_interest_with_periodic_refinance_mem,
+    call_calculate_transfer_tax,
+    investment_upkeep_hmw
+    ),
+  sale_func = list(call_transaction_sell_value_constant_increase),
+  keep_rent_func = list(call_transaction_keep_property_for_rent),
+  tax_func = list(call_calculate_box3),
+  sale_tax_func = list(call_calculate_box3_transaction_only),
+  keep_rent_tax_func = list(call_calculate_box3_transaction_only)
+)
+
+
+returns_box3_sq_zittende_belegger <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq |> list_modify(transfer_tax = 0),
+  funcs = box3_funcs
+)
+
+returns_box3_sq <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq,
+  funcs = box3_funcs
+)
+
+
+returns_box3_wbh_no_transfer_tax <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |> list_modify(transfer_tax = 0),
+  funcs = box3_funcs
+)
+
+
+returns_tuned_wws_zittende_belegger <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |>
+    list_modify(
+      wws_parameters = list(
+        bA1 = 0.63, 
+        bA91 = 5000, 
+        bA91b = 96, 
+        bA93i = 0.80,
+        extra.points.egw = 12,
+        extra.points.mgw = 14,
+        upper_threshold = 255
+      ),
+      transfer_tax = 0
+      ),
+  funcs = box3_funcs
+)
+
+
+returns_box3_woz_cap_no_transfer_tax <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    interest_rate_weight = 0.5, 
+    rent_cap_perc = 0.02,
+    woz_cap_mininum_rent = 2000,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free'),
+    transfer_tax = 0
+    ),
+  funcs = box3_funcs %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_alternatives <- list(
+  list(
+    name = '1. WBH',
+    returns = returns_box3_wbh_no_transfer_tax
+  ),
+  list(
+    name = '2. WBH (optimaal)',
+    returns = returns_tuned_wws_zittende_belegger
+  ),
+  list(
+    name = '3. 5% Woningwaarde',
+    returns = returns_box3_woz_cap_no_transfer_tax
+  )
+)
+```
+
+```{r}
+make_returns_overview <- function(returns) {
+  return_list = list()
+  
+  grouped_returns <- returns$stats %>% 
+    left_join(
+      returns$houses %>% 
+        group_by(huis_id) %>% slice(1) %>% 
+        select(huis_id, wws_points, wws_rent, init_rent, woz_indexed)
+    ) %>%
+    mutate(
+      irr_cat = cut(irr, c(-Inf, 0.0385, 0.064, Inf), c('Laag', 'Marktconform', 'Hoog')),
+      wws_cat = cut(wws_points, c(-Inf, 142, 187, Inf), c('social', 'middle', 'free')),
+      woz_cat = cut(
+        woz_indexed, 
+        c(-Inf, 275000, 500000, Inf), 
+        c('Tot 2,75', '2,75 - 5 ton', '5+ ton'
+          )),
+      rent_cat = cut(
+        init_rent, 
+        c(-Inf, 850, 1100, 1700, Inf), 
+        c('Tot 850 pm', 'Tot 1100 pm', 'Tot 1700 pm', 'Daarboven')
+        ),
+      ) %>%
+    filter(is.finite(wws_cat)) 
+  
+  return_list$categories_stacked <- 
+    grouped_returns %>%
+      group_by(woz_cat, irr_cat) %>%
+      count() %>%
+      filter(is.finite(woz_cat)) %>%
+      group_by(woz_cat) %>%
+      mutate(p = n / sum(n)) %>%
+      ggplot(
+        aes(x = woz_cat, y = p, group = irr_cat, fill = irr_cat)
+      ) +
+      geom_bar(position = 'stack', stat = 'identity') +
+      theme_bw()
+  
+  return_list$violin <- 
+    grouped_returns %>%
+      ggplot(
+        aes(x = woz_cat, y = irr)
+      ) + geom_violin(fill = 'grey90') + coord_cartesian(ylim = c(0, 0.10)) +
+      geom_hline(yintercept = c(0.0413, 0.0613), linetype = 'dashed') +
+      theme_bw() +
+      scale_y_continuous(breaks = seq(0, 0.1, 0.01))
+    
+  return_list$grouped_table <- 
+    grouped_returns %>%
+      group_by(woz_cat) %>%
+      summarise(
+        n = n(),
+        mean_irr = mean(irr), 
+        median_irr = median(irr), 
+        irr_high = sum(irr > 0.062) / n(), 
+        irr_low = sum(irr < 0.041) / n(), 
+        median_wws = median(wws_points),
+        median_rent = median(init_rent)
+      )
+  
+  return_list$grouped_returns <- grouped_returns
+  
+  return(return_list)
+  
+}
+
+make_returns_overview(returns_box3_sq)
+make_returns_overview(returns_box3_sq_zittende_belegger)
+```
+
+```{r}
+
+grouped_returns <- make_returns_overview(returns_box3_sq)$grouped_returns
+
+rent_frac <-
+  grouped_returns %>%
+    group_by(woz_cat) %>%
+    summarise(
+      Huur_rechtmatig = median((init_rent * 12) / (woz_indexed / 2)),
+      wws_rent_investment_frac = median((wws_rent) / (woz_indexed / 2))
+    ) %>%
+    mutate(
+      Huur_boven_WWS = if_else(
+        woz_cat == 'Tot 2,75',
+        Huur_rechtmatig - wws_rent_investment_frac,
+        0
+        )
+    )
+
+rent_frac$Huur_rechtmatig[1] = rent_frac$wws_rent_investment_frac[1]
+
+rent_frac %>%
+  pivot_longer(
+    cols = c(Huur_rechtmatig, Huur_boven_WWS),
+    names_to = 'rent_type',
+    values_to = 'year_rent'
+  ) %>%
+  ggplot(aes(x = woz_cat, y = year_rent, group = rent_type, fill = rent_type)) +
+  geom_bar(stat = 'identity') +
+  theme_bw() +
+  ylab('Huur als % van investering') +
+  xlab('WOZ Categorie')
+
+```
+
+```{r}
+compare_returns <- function(new_returns) {
+  new_houses <- new_returns$returns$houses %>%
+    group_by(huis_id) %>%
+    slice(1)
+  
+  new_cashflows <- new_returns$returns$cashflows %>%
+    group_by(huis_id) %>%
+    slice(1)
+  
+  old_cashflows <- returns_box3_sq_zittende_belegger$cashflows %>%
+    group_by(huis_id) %>%
+    slice(1)
+  
+  tibble(
+    name = new_returns$name,
+    huis_id = new_houses$huis_id,
+    woz = new_houses$woz_indexed,
+    wws_points = new_houses$wws_points,
+    irr_sq = returns_box3_sq_zittende_belegger$stats$irr,
+    irr_new = new_returns$returns$stats$irr,
+    rent_new = new_cashflows$rent_income,
+    rent_old = old_cashflows$rent_income
+  ) %>%
+    filter(rent_new < rent_old) %>%
+    mutate(
+      outcome_type = case_when(
+        irr_sq < 0.061 | irr_new < 0.041 ~ '3. Lage maximumprijs  (Aanbodverlagend)',
+        irr_new > 0.061 ~ '1. Hoge maximumprijs (Laat hoge huren intact)',
+        T ~ '2. Gebalanceerde maximumprijs'
+      ),
+      woz_cat = cut(
+      woz, 
+      c(-Inf, 250000, 500000, Inf), 
+      c('Tot 2,5 ton', '2,5 - 5 ton', '5+ ton'
+        ))
+    ) %>%
+    count(outcome_type) %>%
+    mutate(name = new_returns$name[1], p = n / sum(n))
+}
+
+returns_alternatives |>
+  purrr::map(compare_returns) %>%
+  bind_rows() %>%
+  ggplot(
+    aes(x = name, y = p, group = outcome_type, fill = outcome_type)
+  ) +
+  geom_bar(stat = 'identity') +
+  scale_fill_manual(values = c('#A81F00', '#00A86D', '#FF4419')) +
+  theme_bw() +
+  xlab('Beleidsvariant') +
+  ylab('% van prijsverlagingen')
+
+returns_alternatives |>
+  purrr:::map(pluck,2 ) |>
+  purrr::map(make_returns_overview)
+
+```
+
+```{r}
+count_affordable_types <- function(returns) {
+returns$stats %>%
+  left_join(
+    returns$cashflows %>%
+      group_by(huis_id) %>% slice(1) %>%
+      select(huis_id, rent_income)
+  ) %>%
+  filter(irr > 0.041) %>%
+  mutate(
+    rent_type = cut(
+      rent_income / 12, 
+      breaks = c(-Inf, 1100, 1700, Inf), 
+      labels = c('<1100', '1100-1700', '>1700')
+      ) 
+  ) %>%
+  group_by(rent_type) %>%
+  count()
+}
+
+count_sq <- count_affordable_types(returns_box3_sq_zittende_belegger)
+count_sq %>% ungroup() %>% mutate(mut = n / sum(n))
+
+sum(count_sq$n)
+
+returns_alternatives |>
+  purrr:::map(pluck,2 ) |>
+  purrr::map(count_affordable_types) %>%
+  map(function(d) d %>% ungroup() %>% mutate(mut = n / sum(count_sq$n)))
+```

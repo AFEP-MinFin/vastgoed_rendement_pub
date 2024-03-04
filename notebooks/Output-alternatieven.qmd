@@ -1,0 +1,718 @@
+---
+title: "Output-alternatieven"
+format: html
+editor: visual
+fig-width: 8
+fig-height: 5
+---
+
+## Output Alternatieven
+
+Dit document is ten behoeve van een studie naar mogelijke alternatieven voor de middenhuurhervorming.
+
+## Voorbereiding
+
+Data inladen en opschonen:
+
+```{r}
+library(here)
+source(here('dependencies.R'))
+devtools::load_all()
+print(here())
+
+
+houses <- read_feather(here('sensitive_data_files/houses_realstats_2024-01-08.feather')) %>% filter(is.finite(purchase_price))
+wb <- loadWorkbook(here('nonsensitive_input_files/modelparams_testhuizen_all2.xlsx'))
+realstatshuizen_subset <- read.xlsx(wb, sheet = "voorbeeldhuizen" )
+lookup.table <- read.xlsx(wb, sheet = 'wws_lookup')
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+#houses <- houses %>% filter(huis_id %in% rep(1:100))
+
+house_properties <- houses %>%
+  group_by(huis_id, beleidsvariant) %>%
+  summarise(
+    investment_year = first(investment_year),
+    wws_points = first(wws_points),
+    oppervlak = first(oppervlak),
+    woz_value = first(woz_value),
+    value_estimate_2022 = first(value_estimate_based_on_woz),
+    rent_category = first(rent_category)
+  )
+
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+houses$aankoopwaarde = houses$purchase_price
+houses$overdrachtsbelasting = as.numeric(houses$overdrachtsbelasting)
+houses$belasting_box3_vrijstelling = as.numeric(houses$belasting_box3_vrijstelling)
+houses$box3.percentage = as.numeric(houses$box3.percentage)
+houses$belasting_box3_bezit = as.numeric(houses$belasting_box3_bezit)
+houses$belasting_box3_schuld = as.numeric(houses$belasting_box3_schuld)
+
+```
+
+```{r}
+parameters_2022 <- list(
+  discount_rate = 0.0513,
+  rent_increase = 0.02,
+  upkeep_perc = 0.01,
+  debt_share = 0.5,
+  exploitation_cost = 0.15,
+  incidental_investment_year = 2022,
+  incidental_cost = 10000,
+  refinance_period = 5, # years
+  interest_rate = 0.052,
+  transfer_tax = 0.104,
+  middenhuur_reform = T,
+  lwr = "nieuw",
+  box3_oud = 'nee',
+  middenhuur_bump_percentage = 0,
+  middenhuur_bump_points = 0,
+  rent_cap_perc = NA,
+  rent_func = NA,
+  wws_dwingend = 'ja',
+  rent_cap_direct_return = NA,
+  interest_rates = interest_rates,
+  home_price_decline = -0.06,
+  lookup.table = lookup.table
+)
+
+parameters_2020 <- parameters_2022
+parameters_2020$home_price_decline = NA
+parameters_2020$interest_rate = 0.025
+parameters_2020$transfer_tax = 0.02
+parameters_2020$lwr = "oud"
+parameters_2020$middenhuur_reform = F
+parameters_2020$box3_oud = 'ja'
+parameters_2020$wws_dwingend = 'nee'
+parameters_2020$debt_share = 0.5
+
+parameters_sq <- list(
+  discount_rate = 0.0513,
+  rent_increase = 0.02,
+  upkeep_perc = 0.01,
+  debt_share = 0.5,
+  exploitation_cost = 0.15,
+  incidental_investment_year = 2022,
+  incidental_cost = 10000,
+  refinance_period = 5, # years
+  interest_rate = 0.052,
+  transfer_tax = 0.104,
+  middenhuur_reform = F,
+  lwr = "nieuw",
+  box3_oud = 'nee',
+  middenhuur_bump_percentage = 0,
+  middenhuur_bump_points = 0,
+  rent_cap_perc = NA,
+  rent_func = NA,
+  wws_dwingend = 'nee',
+  rent_cap_direct_return = NA,
+  interest_rates = interest_rates,
+  home_price_decline = -0.0625,
+  lookup.table = lookup.table,
+  vpb_rate = 0.19,
+  box2_rate = 0.245
+)
+
+parameters_wbh <- parameters_sq %>% 
+  list_modify(
+    middenhuur_reform = T,
+    lwr = "nieuw",
+    box3_oud = 'nee',
+    middenhuur_bump_percentage = 0,
+    middenhuur_bump_points = 0,
+    rent_cap_perc = NA,
+    rent_func = NA,
+    wws_dwingend = 'ja'
+  )
+
+box3_funcs_old_cost <- list(
+  rent_func = list(call_calculate_rent_all_houses),
+  cap_func = list(no_cap),
+  aq_cost_func = list(transaction_buy_at_market_value),
+  running_cost_funcs = list(
+    call_interest_with_periodic_refinance_mem,
+    call_calculate_transfer_tax,
+    call_investment_incidental_cost,
+    call_investment_exploitation_cost
+    ),
+  sale_func = list(call_transaction_sell_value_constant_increase),
+  keep_rent_func = list(call_transaction_keep_property_for_rent),
+  tax_func = list(call_calculate_box3),
+  sale_tax_func = list(call_calculate_box3_transaction_only),
+  keep_rent_tax_func = list(call_calculate_box3_transaction_only)
+)
+
+box3_funcs <- list(
+  rent_func = list(call_calculate_rent_all_houses),
+  cap_func = list(no_cap),
+  aq_cost_func = list(transaction_buy_at_market_value),
+  running_cost_funcs = list(
+    call_interest_with_periodic_refinance_mem,
+    call_calculate_transfer_tax,
+    investment_upkeep_hmw
+    ),
+  sale_func = list(call_transaction_sell_value_constant_increase),
+  keep_rent_func = list(call_transaction_keep_property_for_rent),
+  tax_func = list(call_calculate_box3),
+  sale_tax_func = list(call_calculate_box3_transaction_only),
+  keep_rent_tax_func = list(call_calculate_box3_transaction_only)
+)
+
+box3_funcs_limit <-
+  box3_funcs %>%
+  list_modify(
+    rent_func = list(rent_very_high)
+  )
+
+
+returns_2020 <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_2020,
+  funcs = box3_funcs
+)
+
+returns_2022 <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_2022,
+  funcs = box3_funcs
+)
+
+returns_2020_old_cost_method <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_2020,
+  funcs = box3_funcs_old_cost
+)
+
+returns_2022_old_cost_method <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_2022,
+  funcs = box3_funcs_old_cost
+)
+
+returns_box3_sq_old_cost_method <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq,
+  funcs = box3_funcs_old_cost
+)
+
+returns_box3_sq <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq,
+  funcs = box3_funcs
+)
+
+returns_box3_sq_low_interest <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq |> list_modify(interest_rate = 0.025, home_price_decline = 0),
+  funcs = box3_funcs
+)
+
+returns_box3_sq_zittende_belegger <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq |> list_modify(transfer_tax = 0),
+  funcs = box3_funcs
+)
+
+returns_box3_wbh <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh,
+  funcs = box3_funcs
+)
+
+returns_box3_wbh_no_transfer_tax <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |> list_modify(transfer_tax = 0),
+  funcs = box3_funcs
+)
+
+returns_box3_wbh_low_interest <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |> list_modify(interest_rate = 0.025, home_price_decline = 0),
+  funcs = box3_funcs
+)
+
+returns_wbh_max_wws <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh,
+  funcs = box3_funcs |>
+    list_modify(rent_func = list(rent_max_wws))
+)
+
+returns_wbh_max_wws_zittende_belegger <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |> list_modify(transfer_tax = 0),
+  funcs = box3_funcs |>
+    list_modify(rent_func = list(rent_max_wws))
+)
+
+returns_max_tuned_wws <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |>
+    list_modify(
+      wws_parameters = list(
+        bA1 = 0.63, 
+        bA91 = 5754, 
+        bA91b = 94, 
+        bA93i = 0.72,
+        extra.points.egw = 9,
+        extra.points.mgw = 16,
+        upper_threshold = 250
+      )
+      ),
+  funcs = box3_funcs |>
+    list_modify(rent_func = list(rent_max_wws))
+)
+
+returns_max_tuned_wws_zittende_belegger <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |>
+    list_modify(
+      wws_parameters = list(
+        bA1 = 0.63, 
+        bA91 = 5754, 
+        bA91b = 94, 
+        bA93i = 0.72,
+        extra.points.egw = 9,
+        extra.points.mgw = 16,
+        upper_threshold = 250
+      ),
+      transfer_tax = 0
+      ),
+  funcs = box3_funcs |>
+    list_modify(rent_func = list(rent_max_wws))
+)
+
+returns_tuned_wws_zittende_belegger <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |>
+    list_modify(
+      wws_parameters = list(
+        bA1 = 0.63, 
+        bA91 = 5754, 
+        bA91b = 94, 
+        bA93i = 0.72,
+        extra.points.egw = 9,
+        extra.points.mgw = 16,
+        upper_threshold = 250
+      ),
+      transfer_tax = 0
+      ),
+  funcs = box3_funcs
+)
+
+
+
+returns_max_tuned_wws_low_interest <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_wbh |>
+    list_modify(
+      wws_parameters = list(
+        bA1 = 0.63, 
+        bA91 = 5754, 
+        bA91b = 94, 
+        bA93i = 0.72,
+        extra.points.egw = 9,
+        extra.points.mgw = 16,
+        upper_threshold = 250
+      ),
+      interest_rate = 0.025,
+      home_price_decline = 0
+      ),
+  funcs = box3_funcs |>
+    list_modify(rent_func = list(rent_max_wws))
+)
+
+returns_box3_woz_cap <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    interest_rate_weight = 0, 
+    rent_cap_perc = 0.053,
+    woz_cap_mininum_rent = 2000,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free')
+    ),
+  funcs = box3_funcs %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_no_transfer_tax <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    interest_rate_weight = 0, 
+    rent_cap_perc = 0.053,
+    woz_cap_mininum_rent = 2000, 
+    cap_rent_with_woz_cats = c('social', 'middle', 'free'),
+    transfer_tax = 0
+    ),
+  funcs = box3_funcs %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_limit <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    interest_rate_weight = 0, 
+    rent_cap_perc = 0.053,
+    woz_cap_mininum_rent = 2000,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free')
+    ),
+  funcs = box3_funcs_limit %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_limit_no_transfer_tax <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    interest_rate_weight = 0, 
+    rent_cap_perc = 0.053,
+    woz_cap_mininum_rent = 2000,
+    transfer_tax = 0,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free')
+    ),
+  funcs = box3_funcs_limit %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_low_interest <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    rent_cap_perc = 0.053,
+    woz_cap_mininum_rent = 2000,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free'), 
+    interest_rate = 0.025,
+    interest_rate_weight = 0,
+    home_price_decline = 0
+    ),
+  funcs = box3_funcs %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_low_interest_limit <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    rent_cap_perc = 0.053,
+    woz_cap_mininum_rent = 2000,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free'), 
+    interest_rate = 0.025,
+    interest_rate_weight = 0,
+    home_price_decline = 0
+    ),
+  funcs = box3_funcs_limit %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_plus_interest_limit <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% 
+    list_modify(
+      interest_rate_weight = 0.5, 
+      rent_cap_perc = 0.03,
+      woz_cap_mininum_rent = 2000,
+      cap_rent_with_woz_cats = c('social', 'middle', 'free')
+      ),
+  funcs = box3_funcs_limit %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+returns_box3_woz_cap_plus_interest_low_interest_limit <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% list_modify(
+    rent_cap_perc = 0.03,
+    woz_cap_mininum_rent = 2000,
+    cap_rent_with_woz_cats = c('social', 'middle', 'free'), 
+    interest_rate = 0.025,
+    interest_rate_weight = 0.5,
+    home_price_decline = 0
+    ),
+  funcs = box3_funcs_limit %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+
+returns_box3_woz_cap_limit_undo_transfer_tax <- run_scenario_mem(
+  houses = houses,
+  parameters = parameters_sq %>% 
+    list_modify(
+      interest_rate_weight = 0, 
+      rent_cap_perc = 0.03,
+      woz_cap_mininum_rent = 2000,
+      cap_rent_with_woz_cats = c('social', 'middle', 'free'),
+      transfer_tax = 0.00
+      ),
+  funcs = box3_funcs_limit %>% list_modify(cap_func = list(call_cap_rent_at_woz_perc))
+)
+
+
+returns_variations <- list(
+  list(
+    name = 'Returns in SQ', 
+    returns = returns_box3_sq
+    ),
+  list(
+    name = 'Returns in SQ (No Transfer Tax)',
+    returns = returns_box3_sq_zittende_belegger
+  ),
+  list(
+    name = 'Returns in SQ (Low Interest)',
+    returns = returns_box3_sq_low_interest
+  ),
+  list(
+    name = 'Returns in 2020', 
+    returns = returns_2020
+    ),
+  list(
+    name = 'Returns in 2022', 
+    returns = returns_2022
+    ),
+  list(
+    name = 'Returns SQ (Kostenschatting SEO)', 
+    returns = returns_box3_sq_old_cost_method
+    ),
+  list(
+    name = 'Returns in 2020 (Kostenschatting SEO)', 
+    returns = returns_2020_old_cost_method
+    ),
+  list(
+    name = 'Returns in 2022 (Kostenschatting SEO)', 
+    returns = returns_2022_old_cost_method
+    ),
+  list(
+    name = 'Returns in Wet Betaalbare Huur', 
+    returns = returns_box3_wbh
+    ),
+  list(
+    name = 'Returns in Wet Betaalbare Huur (Low Interest)', 
+    returns = returns_box3_wbh_low_interest
+    ),
+  list(
+    name = 'Returns in Wet Betaalbare Huur (No Transfer Tax)', 
+    returns = returns_box3_wbh_no_transfer_tax
+    ),
+  list(
+    name = 'Returns Limit with WBH WWS',
+    returns = returns_wbh_max_wws
+  ),
+  list(
+    name = 'Returns Limit with WBH WWS (No Transfer Tax)',
+    returns = returns_wbh_max_wws_zittende_belegger
+  ),
+  list(
+    name = 'Returns Limit with Tuned WWS',
+    returns = returns_max_tuned_wws
+  ),
+  list(
+    name = 'Returns with Tuned WWS (No Transfer Tax)',
+    returns = returns_tuned_wws_zittende_belegger
+  ),
+  list(
+    name = 'Returns Limit with Tuned WWS (No Transfer Tax)',
+    returns = returns_max_tuned_wws_zittende_belegger
+  ),
+  list(
+    name = 'Returns Limit with Tuned WWS (Low Interest)',
+    returns = returns_max_tuned_wws_low_interest
+  ),
+  list(
+    name = 'Returns with WOZ Rent Cap', 
+    returns = returns_box3_woz_cap
+    ),
+  list(
+    name = 'Returns with WOZ Rent Cap (No Transfer Tax)', 
+    returns = returns_box3_woz_cap_no_transfer_tax
+    ),
+  list(
+    name = 'Returns Limit with WOZ Rent Cap', 
+    returns = returns_box3_woz_cap_limit
+    ),
+  list(
+    name = 'Returns Limit with WOZ Rent Cap & Low Interest Rates', 
+    returns = returns_box3_woz_cap_low_interest_limit
+    ),
+  list(
+    name = 'Returns Limit with WOZ + IR Rent Cap', 
+    returns = returns_box3_woz_cap_plus_interest_limit
+    ),
+  list(
+    name = 'Returns Limit with WOZ + IR Rent Cap & Low Interest Rates', 
+    returns = returns_box3_woz_cap_plus_interest_low_interest_limit
+    ),
+  list(
+    name = 'Returns Limit with WOZ Cap & Transfer Tax Lowered', 
+    returns = returns_box3_woz_cap_limit_undo_transfer_tax
+    )
+)
+```
+
+```{r}
+wws_vs_rent <- returns_variations %>%
+  purrr::map(calculate_rent_for_return)
+
+wws_vs_rent %>%
+  map(plot_return_against_woz)
+```
+
+```{r}
+rent_deviations <-
+  wws_vs_rent %>%
+  map(count_rent_deviations)
+
+wws_vs_rent %>%
+  map(plot_wws_rent_frac)
+
+returns_variations %>%
+  map(function(r) tibble(name = r$name, median_irr = median(r$returns$stats$irr, na.rm = T))) %>%
+  bind_rows()
+
+returns_variations %>%
+  map(
+    function(r) {
+      rendabel = r$returns$stats$irr > 0.8 * 0.0513
+      
+      first_year <- r$returns$cashflows %>% 
+        group_by(huis_id) %>%
+        slice(1)
+        
+      tibble(
+        name = r$name, 
+        perc_rendabel = sum(r$returns$stats$irr > 0.8 * 0.0513, na.rm = T),
+        perc_betaalbaar_850 = sum(first_year$rent_income < 10200, na.rm = T),
+        perc_betaalbaar_1100 = sum(first_year$rent_income < 15600, na.rm = T),
+        perc_betaalbaar_1700 = sum(first_year$rent_income < 20400, na.rm = T),
+        perc_betaalbaar_850_rendabel = sum(first_year$rent_income < 10200 & rendabel, na.rm = T),
+
+        perc_betaalbaar_1100_rendabel = sum(first_year$rent_income < 15600 & rendabel, na.rm = T),
+        perc_betaalbaar_1700_rendabel = sum(first_year$rent_income < 20400 & rendabel, na.rm = T)
+        )
+    }
+    ) %>%
+  bind_rows() %>%
+  mutate(
+    across(starts_with('perc'), ~ .x / nrow(returns_2020$stats))
+  )
+
+```
+
+```{r}
+get_median_houses <- function(returns_variation) {
+  return_data = returns_variation$returns
+  
+  if('highest_cashflow' %in% colnames(return_data$cashflows)) {
+  return_data$cashflows = return_data$cashflows %>%
+    mutate(
+      end_transaction = highest_cashflow
+    )
+  }
+  
+  return_data$cashflows %>%
+    left_join(
+      return_data$houses %>%
+        group_by(huis_id) %>%
+        slice(1) %>%
+        select(huis_id, wws_points, wws_rent)
+    ) %>%
+    group_by(huis_id) %>%
+    mutate(
+      rent_cat = cut(wws_points, c(-Inf, 142, 187, Inf), c('social', 'middle', 'free')),
+      direct_costs = first(upkeep_payments) + first(incidental_investment) / 15,
+      taxes = first(box3_tax) + first(transfer_tax_cashflow) / 15,
+      capital_gains = ((first(aankoop) + last(end_transaction)) * 0.95^15) / 15,
+      interest = mean(interest_payments)
+    ) %>%
+    slice(1) %>%
+    group_by(rent_cat) %>%
+    summarize(
+      direct_costs = median(direct_costs),
+      taxes = median(taxes),
+      interest = median(interest),
+      capital_gains = median(capital_gains),
+      rent = median(avg_rent),
+      wws_rent = median(wws_rent)
+    ) %>%
+    mutate(
+      across(!matches('rent_cat'), ~ .x / 12),
+      name = returns_variation$name
+    )
+}
+
+median_houses <-
+    returns_variations %>%
+    purrr::map(get_median_houses)
+```
+
+```{r}
+
+cashflow_type <-
+  tribble(
+    ~name, ~cashflow_type,
+    'direct_costs', 'costs',
+    'taxes', 'costs',
+    'interest', 'costs',
+    'capital_gains', 'income',
+    'rent', 'income',
+    )
+
+make_median_cost_plot <- function(.data) {
+  .data %>% select(-name) %>%
+    pivot_longer(-rent_cat) %>%
+    left_join(cashflow_type) %>%
+    filter(!is.na(cashflow_type), !is.na(rent_cat)) %>%
+    mutate(value = abs(value)) %>%
+    ggplot(aes(x = cashflow_type, y = value, fill = name)) +
+    geom_bar(position = 'stack', stat = 'identity') +
+    facet_grid(~ rent_cat, switch = "x") +
+    theme_bw() +
+    ylab('Maandelijke inomsten / kosten (EUR)') +
+    xlab('Mediane Kosten versus Inkomsten onder WWS (per segment)') +
+    ggtitle(.data$name[1])
+}
+
+median_houses %>%
+  map(make_median_cost_plot)
+
+```
+
+```{r}
+returns_woco$stats %>%
+  mutate(irr = if_else(irr < 0.1, irr, 0.1)) %>%
+  left_join(
+    returns_woco$houses %>% 
+      mutate(points_cat = cut(wws_points, c(0, 142, 187, Inf))) %>% 
+      select(huis_id, points_cat) 
+    ) %>%
+  ggplot(aes(x = irr)) + 
+  geom_histogram() + 
+  facet_wrap(~points_cat) + 
+  theme_bw() + 
+  geom_vline(xintercept = c(0.0513), linetype = 'dashed')
+
+
+returns_woco$stats %>%
+  left_join(
+    returns_woco$houses %>% 
+      mutate(points_cat = cut(wws_points, c(-Inf, 142, 187, Inf), c('social', 'middle', 'free'))) %>% 
+      select(huis_id, points_cat) 
+    ) %>%
+  group_by(return_class = cut(irr, c(-Inf, 0.05, 0.1, Inf)), points_cat) %>%
+  count() %>%
+  group_by(points_cat) %>%
+  mutate(perc = n / sum(n)) %>%
+  filter(is.finite(points_cat))
+```
+
+## Resultaten
+
+### Plaatje 1: 2020 versus 2022
+
+Het eerste plaatje schetst het verschil tussen rendementen met het beleid uit 2020 en het beleid uit 2022.
+
+```{r}
+returns_2022 <- run_standard_scenario(
+  houses = houses,
+  parameters_2022
+)
+```
+
+```{r}
+houses %>%
+  group_by(huis_id) %>%
+  slice(1) %>%
+ggplot(aes(x = woz_value, y = (12 * init_rent) / woz_value)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth() +
+  theme_bw() +
+  coord_cartesian(xlim = c(0, 800000), ylim = c(0, 0.1)) +
+  xlab('WOZ') +
+  ylab('Jaarhuur / WOZ')
+```

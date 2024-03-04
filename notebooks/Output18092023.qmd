@@ -1,0 +1,623 @@
+---
+title: "Output21062023"
+format: html
+editor: visual
+fig-width: 8
+fig-height: 5
+---
+
+## Output 23-06-2023
+
+Dit document is ten behoeve van de eerste ambtelijke nota over dit project.
+
+## Voorbereiding
+
+Data inladen en opschonen:
+
+```{r}
+library(here)
+source(here('dependencies.R'))
+devtools::load_all()
+print(here())
+
+
+houses <- read_feather(here('nonsensitive_data_files/houses_realstats_2023-11-07.feather')) %>% filter(is.finite(purchase_price))
+wb <- loadWorkbook(here('nonsensitive_input_files/modelparams_testhuizen_all2.xlsx'))
+realstatshuizen_subset <- read.xlsx(wb, sheet = "voorbeeldhuizen" )
+lookup.table <- read.xlsx(wb, sheet = 'wws_lookup')
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+#houses <- houses %>% filter(huis_id %in% rep(1:100))
+
+house_properties <- houses %>%
+  group_by(huis_id, beleidsvariant) %>%
+  summarise(
+    investment_year = first(investment_year),
+    wws_points = first(wws_points),
+    oppervlak = first(oppervlak),
+    woz_value = first(woz_value),
+    value_estimate_2022 = first(value_estimate_based_on_woz),
+    rent_category = first(rent_category)
+  )
+
+interest_rates <- read.xlsx(wb, sheet = "Hypothecaire_rente" )
+
+houses$aankoopwaarde = houses$purchase_price
+houses$overdrachtsbelasting = as.numeric(houses$overdrachtsbelasting)
+houses$belasting_box3_vrijstelling = as.numeric(houses$belasting_box3_vrijstelling)
+houses$box3.percentage = as.numeric(houses$box3.percentage)
+houses$belasting_box3_bezit = as.numeric(houses$belasting_box3_bezit)
+houses$belasting_box3_schuld = as.numeric(houses$belasting_box3_schuld)
+
+
+#cleansing
+```
+
+## Resultaten
+
+### Plaatje 1: 2020 versus 2022
+
+Het eerste plaatje schetst het verschil tussen rendementen met het beleid uit 2020 en het beleid uit 2022.
+
+```{r}
+parameters_2022 <- list(
+  discount_rate = 0.0513,
+  rent_increase = 0.02,
+  upkeep_perc = 0.01,
+  debt_share = 0.5,
+  exploitation_cost = 0.15,
+  incidental_investment_year = 2022,
+  incidental_cost = 10000,
+  refinance_period = 5, # years
+  interest_rate = 0.052,
+  transfer_tax = 0.104,
+  middenhuur_reform = T,
+  lwr = "nieuw",
+  box3_oud = 'nee',
+  middenhuur_bump_percentage = 0,
+  middenhuur_bump_points = 0,
+  rent_cap_perc = NA,
+  rent_func = NA,
+  wws_dwingend = 'ja',
+  rent_cap_direct_return = NA,
+  interest_rates = interest_rates,
+  home_price_decline = -0.06,
+  lookup.table = lookup.table
+)
+
+parameters_2020 <- parameters_2022
+parameters_2020$home_price_decline = NA
+parameters_2020$interest_rate = 0.025
+parameters_2020$transfer_tax = 0.02
+parameters_2020$lwr = "oud"
+parameters_2020$middenhuur_reform = F
+parameters_2020$box3_oud = 'ja'
+parameters_2020$wws_dwingend = 'nee'
+parameters_2020$debt_share = 0.5
+
+
+returns_2020 <- run_standard_scenario(
+  houses = houses,
+  parameters = parameters_2020
+)
+
+returns_2022 <- run_standard_scenario(
+  houses = houses,
+  parameters = parameters_2022
+)
+
+tribble(
+  ~jaar_beleid, ~aanvangsrendement,
+  2020, median(returns_2020$stats$irr, na.rm = T) * 100,
+  2022, median(returns_2022$stats$irr, na.rm = T) * 100
+)
+```
+
+```{r}
+parameters_2020_bestaand <- parameters_2020
+parameters_2020_bestaand$transfer_tax <- 0
+
+parameters_2022_bestaand <- parameters_2022 
+parameters_2022_bestaand$transfer_tax <- 0
+
+returns_2020_bestaand <- run_standard_scenario(
+  houses = houses,
+  parameters = parameters_2020_bestaand
+)
+
+returns_2022_bestaand <- run_standard_scenario(
+  houses = houses,
+  parameters = parameters_2022_bestaand
+)
+
+tribble(
+  ~jaar_beleid, ~aanvangsrendement,
+  2020, median(returns_2020_bestaand$stats$irr, na.rm = T) * 100,
+  2022, median(returns_2022_bestaand$stats$irr, na.rm = T) * 100
+)
+```
+
+```{r}
+returns_pivot <- tibble(
+  huis_id = returns_2022$stats$huis_id,
+  beleidsvariant = returns_2022$stats$beleidsvariant,
+  returns_2020 = returns_2020$stats$irr,
+  returns_2022 = returns_2022$stats$irr
+) %>% 
+  left_join(house_properties) %>%
+  mutate(
+    across(starts_with('returns'), ~ if_else(.x < 0, 0, .x)),
+    across(starts_with('returns'), ~ if_else(.x > 0.2, 0.2, .x))
+  ) %>%
+  pivot_longer(
+    starts_with('returns'),
+    names_to = 'Situatie',
+    names_prefix = 'returns_',
+    values_to = 'Rendement'
+  )
+
+medians <- tribble(
+  ~Jaar, ~Rendement,
+  2020, median(returns_2020$stats$irr, na.rm = T) * 100,
+  2022, median(returns_2022$stats$irr, na.rm = T) * 100
+)
+
+returns_pivot %>%
+  ggplot(aes(x = Situatie, y = Rendement * 100, fill = Situatie)) +
+    geom_violin() + theme_bw() + xlab('Rendement')
+
+p <- 
+  returns_pivot %>%
+  group_by(Situatie) %>%
+  mutate(
+    return_rank =  rank(-Rendement, ties.method = 'random')
+  ) %>%
+  ggplot(
+    aes(x = return_rank / (nrow(.) / 2) , y = Rendement * 100, 
+        fill = Situatie, color = Situatie)
+    ) +
+  geom_area(stat = 'identity', alpha = 0.5, position = 'dodge') +
+  coord_cartesian(ylim = c(0, 20)) +
+  theme_cowplot() +
+  xlab('Woningen Gesorteerd op Netto Rendement') +
+  ylab('Gemodelleerd rendement (procentpunten)') +
+  scale_y_continuous(breaks = c(seq(0, 20))) +
+  geom_hline(yintercept = c(4.8, 5.1), linetype = 'dotted') + 
+  annotate(
+    "text", 
+    x = 0.85, y = 6, 
+    label = "Bovenkant DV Bandbreedte", 
+    size = 2) + 
+  annotate(
+    "text", 
+    x = 0.92, y = 4.2, 
+    label = "Onderkant DV Bandbreedte", 
+    size = 2
+    )
+p
+ggsave(plot = p, filename = here('plots/rendement_curve_per_jaar.png'))
+
+returns_pivot_diff <- tibble(
+  huis_id = returns_2022$stats$huis_id,
+  beleidsvariant = returns_2022$stats$beleidsvariant,
+  returns_2020 = returns_2020$stats$irr,
+  returns_2022 = returns_2022$stats$irr
+) %>% 
+  left_join(house_properties) %>%
+  mutate(
+    Rendementsverschil = pmax(-10, pmin(0, (returns_2022 - returns_2020) * 100))
+  )
+
+returns_pivot %>%
+  filter(Situatie == '2022') %>%
+  ggplot(aes(x = wws_points, y = Rendement)) +
+    geom_point(alpha = 0.5) + theme_bw() + stat_smooth() + 
+  coord_cartesian(xlim = c(50, 250))
+
+returns_pivot %>%
+  filter(Situatie == '2022') %>%
+  ggplot(aes(x = woz_value, y = Rendement)) +
+    geom_point(alpha = 0.5) + theme_bw() + stat_smooth() +
+  coord_cartesian(xlim = c(50000, 750000))
+
+returns_pivot %>%
+  filter(Situatie == '2022') %>%
+  ggplot(aes(x = oppervlak, y = Rendement)) +
+    geom_point(alpha = 0.5) + theme_bw() + stat_smooth() + coord_cartesian(xlim = c(0, 150))
+
+returns_pivot %>%
+  filter(Situatie == '2022') %>%
+  ggplot(aes(x = investment_year, y = Rendement)) +
+    geom_point(alpha = 0.5) + theme_bw() + stat_smooth() + 
+  coord_cartesian(xlim = c(1980, 2022))
+
+returns_pivot_diff %>%
+  ungroup() %>%
+  ggplot(aes(x = wws_points, y = Rendementsverschil)) +
+    geom_point(alpha = 0.5) + theme_bw() + 
+  stat_summary(color = 'green', fill = 'green', geom = 'line') + 
+  coord_cartesian(xlim = c(50, 250))
+
+returns_pivot_diff %>%
+  ungroup() %>%
+  ggplot(aes(x = woz_value, y = Rendementsverschil)) +
+    geom_point(alpha = 0.5) + theme_bw() + 
+  stat_summary_bin(color = 'green', fill = 'green', geom = 'line', bins = 100) + 
+  coord_cartesian(xlim = c(50000, 750000))
+
+returns_pivot_diff %>%
+  ungroup() %>%
+  ggplot(aes(x = oppervlak, y = Rendementsverschil)) +
+    geom_point(alpha = 0.5) + theme_bw() + 
+  stat_summary_bin(color = 'green', fill = 'green', geom = 'line', bins = 100) + 
+  coord_cartesian(xlim = c(20, 150))
+
+returns_pivot_diff %>%
+  group_by(rent_category, returns_2020 > 0.055, returns_2022 > 0.055) %>%
+  count()
+```
+
+```{r}
+Hervorming_Dwingend_WWS_plus_Middenhuur <- run_standard_scenario(
+  houses = houses,
+  parameters = list_modify(parameters_2020,middenhuur_reform = T, wws_dwingend = 'ja')
+)
+
+Box3_aanpassingen_Rutte_IV <- run_standard_scenario(
+  houses = houses,
+  parameters = list_modify(parameters_2020, 
+      lwr = 'nieuw',
+      box3_oud = 'nee'
+      )
+)
+
+Stijging_Rente <- run_standard_scenario(
+  houses = houses,
+  parameters = list_modify(parameters_2020, interest_rate = 0.052, home_price_decline = -0.06)
+)
+
+Verhoging_OVB <- run_standard_scenario(
+  houses = houses,
+  parameters = list_modify(parameters_2020, transfer_tax = 0.104)
+)
+
+Dwingend_WWS <- run_standard_scenario(
+  houses = houses,
+  parameters = list_modify(parameters_2020,
+    wws_dwingend = 'ja'
+    )
+)
+
+returns_pivot <- tibble(
+  huis_id = returns_2020$stats$huis_id,
+  beleidsvariant = returns_2020$stats$beleidsvariant,
+  irr_2020 = returns_2020$stats$irr,
+  irr_Dwingend_WWS_plus_Middenhuur = Hervorming_Dwingend_WWS_plus_Middenhuur$stats$irr,
+  irr_Box3_aanpassingen_Rutte_IV = Box3_aanpassingen_Rutte_IV$stats$irr,
+  irr_Stijging_Rente = Stijging_Rente$stats$irr,
+  irr_Dwingend_WWS = Dwingend_WWS$stats$irr,
+  irr_Verhoging_OVB = Verhoging_OVB$stats$irr
+) %>% 
+  left_join(house_properties) %>%
+  mutate(
+    across(starts_with('irr_'), ~ if_else(.x < 0, 0, .x)),
+    across(starts_with('irr_'), ~ if_else(.x > 0.2, 0.2, .x)),
+    across(starts_with('irr_'), ~ (irr_2020 - .x) * 100)
+  ) %>%
+  select(-irr_2020) %>%
+  pivot_longer(
+    starts_with('irr_'),
+    names_to = 'Scenario',
+    values_to = 'Rendementsverschil'
+  ) %>%
+  mutate(
+    Rendementsverschil = pmin(10, pmax(0, Rendementsverschil))
+  )
+
+returns_pivot %>%
+  ggplot(aes(x = Scenario, y = Rendementsverschil, fill = Scenario)) +
+    geom_violin() + theme_bw() + xlab('Rendementsverschil')
+
+p <- returns_pivot %>%
+  group_by(Scenario) %>%
+  mutate(
+    return_rank =  rank(-Rendementsverschil, ties.method = 'random')
+  ) %>%
+  arrange(return_rank) %>%
+  ungroup() %>%
+  ggplot(
+    aes(
+      x = return_rank / (nrow(.) / 5) , 
+      y = -Rendementsverschil, 
+      fill = Scenario,
+      group = Scenario, 
+      color = Scenario
+      )
+    ) +
+  geom_area(stat = 'identity', alpha = 0.5) + 
+  facet_wrap(vars(Scenario)) + 
+  coord_cartesian(ylim = c(-10, 0)) +
+  theme_cowplot() +
+  xlab('Woningen Gesorteerd op Rendementsverlies') +
+  ylab('Gemodelleerd rendementsverlies (procentpunten)') +
+  scale_y_continuous(breaks = c(seq(0, -10))) + theme(legend.position = 'none')
+
+ggsave(plot = p, filename = here('plots/rendement_daling_per_factor.png'))
+
+
+p <- returns_pivot %>%
+  left_join(returns_2020$stats %>% select(huis_id, irr_2020 = irr)) %>%
+  mutate(perc_verlies = abs(Rendementsverschil / (irr_2020 * 100)) * 100) %>%
+  group_by(Scenario) %>%
+  mutate(
+    return_rank =  rank(-perc_verlies, ties.method = 'random')
+  ) %>%
+  arrange(return_rank) %>%
+  ungroup() %>%
+  ggplot(
+    aes(
+      x = return_rank / (nrow(.) / 5) , 
+      y = -perc_verlies, 
+      fill = Scenario,
+      group = Scenario, 
+      color = Scenario
+      )
+    ) +
+  geom_area(stat = 'identity', alpha = 0.5) + 
+  facet_wrap(vars(Scenario)) + 
+  coord_cartesian(ylim = c(-100, 0)) +
+  theme_cowplot() +
+  xlab('Woningen Gesorteerd op Rendementsverlies') +
+  ylab('Gemodelleerd rendementsverlies (%)') +
+  scale_y_continuous(breaks = c(seq(0, -100, -25))) + theme(legend.position = 'none')
+
+ggsave(plot = p, filename = here('plots/perc_rendement_daling_per_factor.png'))
+```
+
+```{r}
+med_loss <- returns_pivot %>%
+  ungroup() %>%
+  left_join(returns_2020$stats %>% select(huis_id, irr_2020 = irr)) %>%
+  mutate(perc_verlies = abs(Rendementsverschil / irr_2020)) %>%
+  group_by(Scenario, rent_category) %>%
+  summarise( 
+    n = n(),
+    mean_verlies = mean(Rendementsverschil, na.rm = T),
+    mediaan_verlies = median(Rendementsverschil, na.rm = T),
+    mediaan_verlies_geraakt = median(Rendementsverschil[Rendementsverschil > 0], na.rm = T),
+    mediaan_perc_verlies = median(perc_verlies, na.rm = T),
+    aantal_geraakt_door_maatregelen = sum(Rendementsverschil > 0.1, na.rm = T) / n()
+  )
+write_csv2(med_loss, file = here('data_files/verlies_per_cat_per_factor.csv'))
+
+med_loss$Scenario <- 
+  factor(
+    med_loss$Scenario, 
+    levels = c(
+      'irr_Dwingend_WWS_plus_Middenhuur', 
+      'irr_Stijging_Rente', 'irr_Box3_aanpassingen_Rutte_IV', 'irr_Verhoging_OVB')
+    )
+
+med_loss$rent_category <- 
+  factor(
+    med_loss$rent_category, 
+    levels = c(
+      'free', 
+      'middle', 
+      'social'
+      )
+    )
+
+p <- ggplot(
+  med_loss %>% filter(Scenario != 'irr_Dwingend_WWS'), 
+  aes(
+    x = rent_category, 
+    y = -mediaan_verlies, 
+    group = Scenario, 
+    fill = Scenario )
+  ) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  theme_bw() +
+  ylab('Mediaan Rendementsverlies (procentpunt)') +
+  xlab('Sector')
+ggsave(
+  plot = p, 
+  filename = here('plots/rendementsverlies_per_factor_per_sector.png'),
+  height = 4, width = 7) 
+```
+
+```{r}
+
+change_debt_share <- function(debt_share) {
+  returns_2020 <- run_standard_scenario(
+    houses = houses,
+    parameters = list_modify(parameters_2020 , debt_share = debt_share)
+  )
+  
+  returns_2022 <- run_standard_scenario(
+    houses = houses,
+    parameters = list_modify(parameters_2022, debt_share = debt_share)
+  )
+  
+  tribble(
+    ~jaar_beleid, ~aanvangsrendement,
+    2020, median(returns_2020$stats$irr, na.rm = T) * 100,
+    2022, median(returns_2022$stats$irr, na.rm = T) * 100
+  )
+}
+
+debt_share_outcomes <- lapply(list(0, 0.3, 0.5, 0.7), change_debt_share) %>% bind_rows()
+debt_share_outcomes$leverage = unlist(lapply(c(0, 0.3, 0.5, 0.7), rep, 2, simplify = T))
+
+
+write_csv2(debt_share_outcomes, file = here('data_files/rendement_per_leverage.csv'))
+```
+
+```{r}
+returns_2022$houses %>% 
+  group_by(huis_id) %>% 
+  slice(1) %>% 
+  group_by(rent_category) %>% 
+  summarise(
+    median_wws_rent = median(wws_rent) / 12, 
+    median_rent_price = median(init_rent)
+    ) %>%
+  write_csv2(here('data_files/wws_rent_versus_market_rent.csv'))
+
+p <- 
+  returns_2022$houses %>% 
+  group_by(huis_id) %>% 
+  slice(1) %>%
+  filter(rent_category %in% c('social')) %>%
+  mutate(
+    rental_diff = init_rent - (wws_rent / 12), 
+    rental_frac = init_rent / (wws_rent / 12)
+    ) %>%
+  ggplot(aes(x = wws_rent / 12, y = init_rent)) + 
+  geom_point(position = 'jitter', alpha = 0.3) +
+  coord_cartesian(xlim = c(0, 1500), ylim = c(0, 1500)) + 
+  geom_vline(xintercept = 780, linetype = 'dashed') + 
+  geom_abline(slope = 1, linetype = 'dotted') +
+  xlab('Gemodelleerde WWS huur') + ylab('Gevraagde huurprijs') +
+  theme_bw() + geom_smooth(alpha = 0, color = 'red') +
+  scale_y_continuous(breaks = seq(0, 1500, 100)) +
+  scale_x_continuous(breaks = seq(0, 1500, 100))
+
+ggsave(plot = p, filename = here('plots/gevraagde_huur_gereguleerde_sector.png'))
+```
+
+```{r}
+returns_pivot_diff %>% 
+  pivot_longer(
+    starts_with('returns'), 
+    names_prefix = 'returns_', 
+    names_to = 'year', 
+    values_to = 'rendement'
+    ) %>%
+  group_by(
+    rent_category, year,
+    rendabiliteit = case_when(
+      rendement > 0.0513 ~ 'boven_bb',
+      rendement > 0.048 ~ 'binnen_bb',
+      T ~ 'onder_bb')
+    ) %>%
+  count() %>%
+  group_by(rent_category, year) %>%
+  mutate(perc = (n / sum(n)) * 100) %>%
+  write_csv2(file = here('data_files/rendabiliteit_per_sector_per_jaar.csv'))
+
+
+returns_pivot_diff %>% 
+    pivot_longer(
+      starts_with('returns'), 
+      names_prefix = 'returns_', 
+      names_to = 'year', 
+      values_to = 'rendement'
+      ) %>%
+    group_by(
+      rent_category,
+      year
+    ) %>%
+    summarise(
+      mediaan_rendement = median(rendement),
+      p10 = quantile(rendement, 0.1),
+      p90 = quantile(rendement, 0.9)
+  ) %>%
+  write_csv2(file = here('data_files/rendement_per_sector_per_jaar.csv'))
+```
+
+```{r}
+start_situation_new <- list_modify(parameters_2020, refinance_period = 1)
+start_situation_existing <- list_modify(start_situation_new, transfer_tax = 0, refinance_period = 5)
+
+after_interest_rise_new <- list_modify(start_situation_new , interest_rate = 0.052, home_price_decline = -0.06)
+after_interest_rise_old <- list_modify(after_interest_rise_new, transfer_tax = 0,refinance_period = 5)
+
+after_fiscal_policy_new <- list_modify(after_interest_rise_new, transfer_tax = 0.104, box3_oud = 'nee', lwr = "nieuw",)
+after_fiscal_policy_old <- list_modify(after_fiscal_policy_new,
+                                       transfer_tax = 0, 
+                                       refinance_period = 5)
+
+after_wbh_new <- list_modify(after_fiscal_policy_new,
+    middenhuur_reform = T,
+  wws_dwingend = 'ja'
+  )
+after_wbh_old <- list_modify(after_wbh_new, 
+                             transfer_tax = 0, 
+                             refinance_period = 5)
+
+situations <- list(
+  start_situation_new,
+  start_situation_existing,
+  after_interest_rise_new,
+  after_interest_rise_old,
+  after_fiscal_policy_new,
+  after_fiscal_policy_old,
+  after_wbh_new,
+  after_wbh_old
+)
+
+situations_res <- lapply(situations, run_standard_scenario, houses = houses)
+
+p_minimum_return <- 
+  sapply(
+    situations_res, 
+    function(x) sum(x$stats$irr > 0.0513, na.rm = T) / length(x$stats$irr)
+    )
+
+median_return <- 
+  sapply(
+    situations_res, 
+    function(x) median(x$stats$irr, na.rm = T)
+    )
+
+situation_table <-
+  tribble(
+    ~Maatregelen, ~Type,
+    'Nulsituatie', 'Nieuwe verhuurder',
+    'Nulsituatie', 'Zittende verhuurder',
+    'Na rentestijging', 'Nieuwe verhuurder',
+    'Na rentestijging', 'Zittende verhuurder',
+    'Na fiscale maatregelen', 'Nieuwe verhuurder',
+    'Na fiscale maatregelen', 'Zittende verhuurder',
+    'Na Wet Betaalbare Huur', 'Nieuwe verhuurder',
+    'Na Wet Betaalbare Huur', 'Zittende verhuurder',
+    )
+
+situation_table$frac_above_minimum_return <- p_minimum_return
+situation_table$median_return <- median_return
+
+write_csv2(situation_table, here('data_files/stapling_tabel.csv'))
+
+p <- ggplot(situation_table,
+       aes(
+         x = reorder(Maatregelen, -median_return), 
+         y = median_return * 100, 
+         group = Type, fill = Type)
+       ) +
+  geom_bar(position = 'dodge', stat = 'identity') +
+  theme_bw() + ylab('Mediaan Rendement (procentpunt)') +
+  xlab('Stapeling Factoren')+
+  geom_hline(yintercept = 5.13, linetype = 'dotted')
+
+ggsave(
+  plot = p, 
+  filename = here('plots/stapeling_rendement.jpeg'),
+  height = 5, width = 9) 
+
+p <- ggplot(situation_table,
+       aes(
+         x = reorder(Maatregelen, -frac_above_minimum_return), 
+         y = frac_above_minimum_return * 100, 
+         group = Type, fill = Type)
+       ) +
+  geom_bar(position = 'dodge', stat = 'identity') +
+  theme_bw() + ylab('% woningen met rendement boven generieke eis') +
+  xlab('Stapeling Factoren')
+
+ggsave(
+  plot = p, 
+  filename = here('plots/stapeling_onder_rendementseis.jpeg'),
+  height = 5, width = 9) 
+
+```
