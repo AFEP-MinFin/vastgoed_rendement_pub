@@ -7,7 +7,7 @@
 #' @export
 
 calculate_transfer_tax <- function(houses, transfer_tax){
-  assert_that( all(has_name(houses, c('value_estimate_based_on_woz','simulation_year'))) , msg = 'Required variable not available' )
+  assert_that( all(has_name(houses, c('woz_indexed','simulation_year'))) , msg = 'Required variable not available' )
   transfer_tax_cashflow = case_when(houses$simulation_year == 2022 ~ -1 * houses$woz_indexed * transfer_tax,
                                     T ~ 0)
   return(tibble(transfer_tax_cashflow))

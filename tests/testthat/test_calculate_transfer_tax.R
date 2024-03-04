@@ -1,5 +1,5 @@
 mock_houses <- tibble(
-  value_estimate_based_on_woz = 200000,
+  woz_indexed = 200000,
   simulation_year = 2022
 )
 
