@@ -1,4 +1,4 @@
-# Het rendement van partciuliere verhuurders 
+# Het rendement van particuliere verhuurders 
 
 Particuliere verhuurders hebben sinds 2022 te maken met tenminste drie ontwikkelingen die het rendement van huurwoningen drukken: (1) de stijging van de hypotheekrente, (2) de aangekondigde Wet betaalbare huur en (3) de aanpassing van drie fiscale maatregelen (i. box 3, ii. leegwaarderatio en iii. overdrachtsbelasting).
 
